@@ -3426,6 +3426,41 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto width = (unsigned int) desc.Width;
     const auto height = desc.Height;
 
+    // MSFS 2024: ignore short-lived lower-resolution output surfaces rather than
+    // rebuilding the neural model (and retaining several expensive old models).
+    // Accept an upgrade immediately; accept a downgrade only after 16 consecutive
+    // frames at the same size. This never changes the actual texture dimensions.
+    // A skipped frame keeps the game's original output intact.
+    if (g_nr.feature != nullptr && g_nr.width != 0 && g_nr.height != 0 &&
+        (width != g_nr.width || height != g_nr.height))
+    {
+        static unsigned int pendingWidth = 0;
+        static unsigned int pendingHeight = 0;
+        static unsigned int pendingFrames = 0;
+
+        const bool smaller = (unsigned long long) width * height <
+                             (unsigned long long) g_nr.width * g_nr.height;
+        if (pendingWidth != width || pendingHeight != height)
+        {
+            pendingWidth = width;
+            pendingHeight = height;
+            pendingFrames = 0;
+        }
+        if (pendingFrames < 16)
+            ++pendingFrames;
+
+        if (smaller && pendingFrames < 16)
+        {
+            if (pendingFrames == 1)
+                LOG_INFO("DLSS-NR resolution guard: ignoring transient {}x{}; model remains {}x{}",
+                         width, height, g_nr.width, g_nr.height);
+            Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+            device->Release();
+            return;
+        }
+        pendingFrames = 0;
+    }
+
     // Depth and motion vectors are the upscaler's inputs and so are at render resolution, while colour
     // and output are at display resolution. The model takes that as a subrect per resource rather than
     // needing them resampled, which is why nothing here rescales anything.
